@@ -21,9 +21,6 @@ async setRecordingOptions(options: RecordingOptions) : Promise<Result<null, null
     else return { status: "error", error: e  as any };
 }
 },
-async createCameraWindow() : Promise<void> {
-    await TAURI_INVOKE("create_camera_window");
-},
 async startRecording() : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("start_recording") };
@@ -294,6 +291,22 @@ async deleteAuthOpenSignin() : Promise<Result<null, string>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+async resetCameraPermissions() : Promise<Result<null, null>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("reset_camera_permissions") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async resetMicrophonePermissions() : Promise<Result<null, null>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("reset_microphone_permissions") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -362,7 +375,7 @@ export type CursorType = "pointer" | "circle"
 export type Display = { path: string }
 export type DisplaySource = { variant: "screen" } | { variant: "window"; bounds: Bounds }
 export type EditorStateChanged = { playhead_position: number }
-export type GeneralSettingsStore = { upload_individual_files: boolean }
+export type GeneralSettingsStore = { upload_individual_files: boolean; open_editor_after_recording: boolean; hide_dock_icon?: boolean }
 export type Hotkey = { code: string; meta: boolean; ctrl: boolean; alt: boolean; shift: boolean }
 export type HotkeyAction = "startRecording" | "stopRecording" | "restartRecording" | "takeScreenshot"
 export type HotkeysConfiguration = { show: boolean }

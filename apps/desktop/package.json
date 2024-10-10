@@ -2,7 +2,7 @@
   "name": "@cap/desktop",
   "type": "module",
   "scripts": {
-    "dev": "dotenv -e ../../.env -- tauri dev",
+    "dev": "RUST_BACKTRACE=full dotenv -e ../../.env -- tauri dev",
     "localdev": "vinxi dev --port 3001",
     "build": "vinxi build",
     "tauri": "tauri"
@@ -13,7 +13,7 @@
     "@cap/ui-solid": "workspace:*",
     "@cap/utils": "workspace:*",
     "@corvu/tooltip": "^0.2.1",
-    "@kobalte/core": "^0.13.6",
+    "@kobalte/core": "^0.13.7",
     "@solid-primitives/bounds": "^0.0.122",
     "@solid-primitives/context": "^0.2.3",
     "@solid-primitives/date": "^2.0.23",

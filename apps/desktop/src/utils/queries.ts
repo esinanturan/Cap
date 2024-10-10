@@ -3,11 +3,14 @@ import { createTimer } from "@solid-primitives/timer";
 
 import { commands } from "./tauri";
 import { createQueryInvalidate } from "./events";
+import { createStore, reconcile } from "solid-js/store";
+import { createMemo } from "solid-js";
 
-export const getWindows = queryOptions({
+export const listWindows = queryOptions({
   queryKey: ["capture", "windows"] as const,
   queryFn: () => commands.listCaptureWindows(),
   reconcile: "id",
+  refetchInterval: 1000,
 });
 
 const getOptions = queryOptions({
@@ -26,13 +29,39 @@ const getCurrentRecording = queryOptions({
   },
 });
 
+const listVideoDevices = queryOptions({
+  queryKey: ["videoDevices"] as const,
+  queryFn: () => commands.listCameras(),
+  refetchInterval: 1000,
+});
+
+export function createVideoDevicesQuery() {
+  const query = createQuery(() => listVideoDevices);
+
+  const [videoDevicesStore, setVideoDevices] = createStore<string[]>([]);
+
+  createMemo(() => {
+    setVideoDevices(reconcile(query.data ?? []));
+  });
+
+  return videoDevicesStore;
+}
+
 export const listAudioDevices = queryOptions({
   queryKey: ["audioDevices"] as const,
   queryFn: async () => {
     const r = await commands.listAudioDevices();
-    if (r.status === "ok") return r.data.map((name) => ({ name }));
+    if (r.status === "ok")
+      return r.data.map((name) => ({ name, deviceId: name }));
   },
   reconcile: "name",
+  refetchInterval: 1000,
+});
+
+export const getPermissions = queryOptions({
+  queryKey: ["permissionsOS"] as const,
+  queryFn: () => commands.doPermissionsCheck(true),
+  refetchInterval: 1000,
 });
 
 export function createOptionsQuery() {
@@ -42,19 +71,6 @@ export function createOptionsQuery() {
   return options;
 }
 
-export function createWindowsQuery() {
-  const windows = createQuery(() => getWindows);
-  createTimer(() => windows.refetch(), 1000, setInterval);
-
-  return windows;
-}
-
-export function createAudioDevicesQuery() {
-  const devices = createQuery(() => listAudioDevices);
-  createTimer(() => devices.refetch(), 1000, setInterval);
-
-  return devices;
-}
 export function createCurrentRecordingQuery() {
   const currentRecording = createQuery(() => getCurrentRecording);
   createQueryInvalidate(currentRecording, "currentRecordingChanged");

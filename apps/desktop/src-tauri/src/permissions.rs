@@ -1,12 +1,13 @@
 use serde::{Deserialize, Serialize};
-use tauri::{Manager, WebviewUrl, WebviewWindow, Wry};
+use tauri::AppHandle;
 
 use core_foundation::boolean::CFBoolean;
 use core_foundation::dictionary::{CFDictionary, CFDictionaryRef}; // Import CFDictionaryRef
 use core_foundation::string::CFString;
 #[cfg(target_os = "macos")]
 use nokhwa_bindings_macos::{AVAuthorizationStatus, AVMediaType};
-use std::os::raw::c_void;
+
+use crate::windows::CapWindow;
 
 #[cfg(target_os = "macos")]
 #[link(name = "ApplicationServices", kind = "framework")]
@@ -211,24 +212,8 @@ pub fn request_accessibility_permission() {
     }
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 #[specta::specta]
-pub fn open_permissions_window(app: &impl Manager<Wry>) {
-    if let Some(window) = app.get_webview_window("permissions") {
-        window.set_focus().ok();
-        return;
-    }
-
-    WebviewWindow::builder(app, "permissions", WebviewUrl::App("/permissions".into()))
-        .title("Cap")
-        .inner_size(300.0, 256.0)
-        .resizable(false)
-        .maximized(false)
-        .shadow(true)
-        .accept_first_mouse(true)
-        .transparent(true)
-        .hidden_title(true)
-        .decorations(false)
-        .build()
-        .ok();
+pub fn open_permissions_window(app: AppHandle) {
+    CapWindow::Permissions.show(&app).ok();
 }

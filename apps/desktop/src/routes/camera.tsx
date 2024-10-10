@@ -12,15 +12,15 @@ import {
   createEffect,
   createResource,
   createSignal,
-  on,
+  onCleanup,
 } from "solid-js";
 import { createStore } from "solid-js/store";
 import { ToggleButton as KToggleButton } from "@kobalte/core/toggle-button";
 import { cx } from "cva";
 
-import { createCameraForLabel } from "~/utils/media";
 import { createOptionsQuery } from "~/utils/queries";
 import { commands } from "~/utils/tauri";
+import { createImageDataWS, createLazySignal } from "~/utils/socket";
 
 namespace CameraWindow {
   export type Size = "sm" | "lg";
@@ -32,12 +32,12 @@ namespace CameraWindow {
   };
 }
 
+const BAR_HEIGHT = 56;
+
+const { cameraWsPort } = (window as any).__CAP__;
+
 export default function () {
   const options = createOptionsQuery();
-
-  const camera = createCameraForLabel(() => options.data?.cameraLabel ?? "");
-
-  const [cameraPreviewRef] = createCameraPreview(() => camera()?.deviceId);
 
   const [state, setState] = makePersisted(
     createStore<CameraWindow.State>({
@@ -47,34 +47,49 @@ export default function () {
     })
   );
 
-  createEffect(on(() => state.size, resizeWindow));
+  const [latestFrame, setLatestFrame] = createLazySignal<ImageData | null>();
+
+  createImageDataWS(`ws://localhost:${cameraWsPort}`, (imageData) => {
+    setLatestFrame(imageData);
+    const ctx = cameraCanvasRef?.getContext("2d");
+    ctx?.putImageData(imageData, 0, 0);
+  });
+
+  const [windowSize] = createResource(
+    () => state.size,
+    async (size) => {
+      const monitor = await currentMonitor();
+
+      const windowSize = size === "sm" ? 230 : 400;
+      const windowHeight = windowSize + BAR_HEIGHT;
+
+      if (!monitor) return;
+
+      const scalingFactor = monitor.scaleFactor;
+      const width = monitor.size.width / scalingFactor - windowSize - 100;
+      const height = monitor.size.height / scalingFactor - windowHeight - 100;
+
+      const currentWindow = getCurrentWindow();
+      currentWindow.setSize(new LogicalSize(windowSize, windowHeight));
+      currentWindow.setPosition(new LogicalPosition(width, height));
+
+      return { width, height, size: windowSize };
+    }
+  );
+
+  let cameraCanvasRef: HTMLCanvasElement | undefined;
 
   return (
-    <Suspense fallback={<div class="w-screen h-screen bg-red-400" />}>
+    <Suspense fallback={<CameraLoadingState shape={state.shape} />}>
       <Show when={options.data}>
         {(options) => (
           <div
             data-tauri-drag-region
-            class="cursor-move group w-screen h-screen relative flex flex-col"
+            class="cursor-move group w-screen h-screen relative flex flex-col bg-black"
             style={{ "border-radius": cameraBorderRadius(state) }}
           >
-            <div class="h-16" data-tauri-drag-region />
-            <div class="flex flex-col flex-1 relative" data-tauri-drag-region>
-              <video
-                data-tauri-drag-region
-                autoplay
-                playsinline
-                muted
-                class={cx(
-                  "w-full h-full object-cover pointer-events-none border-none shadow-lg",
-                  state.shape === "round" ? "rounded-full" : "rounded-3xl"
-                )}
-                style={{
-                  transform: state.mirrored ? "scaleX(1)" : "scaleX(-1)",
-                }}
-                ref={cameraPreviewRef}
-              />
-              <div class="flex flex-row items-center justify-center absolute -top-14 inset-x-0">
+            <div class="h-14">
+              <div class="flex flex-row items-center justify-center">
                 <div class="flex flex-row gap-[0.25rem] p-[0.25rem] opacity-0 group-hover:opacity-100 translate-y-2 group-hover:translate-y-0 rounded-xl transition-[opacity,transform] bg-gray-500 border border-white-transparent-20 text-gray-400">
                   <ControlButton
                     onClick={() => {
@@ -113,10 +128,98 @@ export default function () {
                 </div>
               </div>
             </div>
+            <div
+              class={cx(
+                "flex flex-col flex-1 relative overflow-hidden pointer-events-none border-none shadow-lg",
+                state.shape === "round" ? "rounded-full" : "rounded-3xl"
+              )}
+              data-tauri-drag-region
+            >
+              <Show when={latestFrame()}>
+                {(latestFrame) => {
+                  const style = () => {
+                    const aspectRatio =
+                      latestFrame().width / latestFrame().height;
+
+                    const windowWidth = windowSize()?.size ?? 0;
+
+                    const size = (() => {
+                      if (aspectRatio > 1)
+                        return {
+                          width: windowWidth * aspectRatio,
+                          height: windowWidth,
+                        };
+                      else
+                        return {
+                          width: windowWidth,
+                          height: windowWidth * aspectRatio,
+                        };
+                    })();
+
+                    const left =
+                      aspectRatio > 1 ? (size.width - windowWidth) / 2 : 0;
+                    const top =
+                      aspectRatio > 1 ? 0 : (windowWidth - size.height) / 2;
+
+                    return {
+                      width: `${size.width}px`,
+                      height: `${size.height}px`,
+                      left: `-${left}px`,
+                      top: `-${top}px`,
+                      transform: state.mirrored ? "scaleX(-1)" : "scaleX(1)",
+                    };
+                  };
+
+                  return (
+                    <canvas
+                      data-tauri-drag-region
+                      class={cx("absolute")}
+                      style={style()}
+                      width={latestFrame().width}
+                      height={latestFrame().height}
+                      ref={cameraCanvasRef!}
+                    />
+                  );
+                }}
+              </Show>
+            </div>
           </div>
         )}
       </Show>
     </Suspense>
+  );
+}
+
+function CameraLoadingState(props: { shape: CameraWindow.Shape }) {
+  const [loadingText, setLoadingText] = createSignal("Camera is loading");
+
+  createEffect(() => {
+    const loadingMessages = [
+      "Camera is loading",
+      "Acquiring lock on camera",
+      "Camera is starting",
+    ];
+    let index = 0;
+    const interval = setInterval(() => {
+      setLoadingText(loadingMessages[index]);
+      index = (index + 1) % loadingMessages.length;
+    }, 2000);
+
+    onCleanup(() => clearInterval(interval));
+  });
+
+  return (
+    <div class="flex flex-col w-full h-full">
+      <div class="h-14" />
+      <div
+        class={cx(
+          "w-full flex-1 bg-gray-500 flex items-center justify-center",
+          props.shape === "round" ? "rounded-full" : "rounded-3xl"
+        )}
+      >
+        <div class="text-gray-300 text-sm">{loadingText()}</div>
+      </div>
+    </div>
   );
 }
 
@@ -125,64 +228,6 @@ function cameraBorderRadius(state: CameraWindow.State) {
   if (state.size === "sm") return "3rem";
   return "4rem";
 }
-
-const BAR_HEIGHT = 56;
-async function resizeWindow(size: CameraWindow.Size) {
-  const monitor = await currentMonitor();
-
-  const windowWidth = size === "sm" ? 230 : 400;
-  const windowHeight = windowWidth + BAR_HEIGHT;
-
-  if (!monitor) return;
-
-  const scalingFactor = monitor.scaleFactor;
-  const x = monitor.size.width / scalingFactor - windowWidth - 100;
-  const y = monitor.size.height / scalingFactor - windowHeight - 100;
-
-  const currentWindow = getCurrentWindow();
-  currentWindow.setSize(new LogicalSize(windowWidth, windowHeight));
-  currentWindow.setPosition(new LogicalPosition(x, y));
-}
-
-function createCameraPreview(deviceId: () => string | undefined) {
-  const [cameraStream] = createResource(
-    deviceId,
-
-    (cameraInputId) =>
-      navigator.mediaDevices.getUserMedia({
-        video: { deviceId: cameraInputId },
-      })
-  );
-
-  const [cameraRef, setCameraRef] = createSignal<HTMLVideoElement>();
-
-  createEffect(() => {
-    const stream = cameraStream();
-    const ref = cameraRef();
-
-    if (ref && stream) {
-      if (ref.srcObject === stream) return;
-      ref.srcObject = stream;
-      ref.play();
-    }
-  });
-
-  return [setCameraRef] as const;
-}
-
-// {
-//   "title": "Cap Permissions",
-//   "label": "permissions",
-//   "width": 400,
-//   "height": 400,
-//   "decorations": false,
-//   "resizable": false,
-//   "maximized": false,
-//   "shadow": true,
-//   "transparent": true,
-//   "acceptFirstMouse": true,
-//   "url": "/permissions-macos"
-// }
 
 function ControlButton(
   props: Omit<ComponentProps<typeof KToggleButton>, "type" | "class"> & {

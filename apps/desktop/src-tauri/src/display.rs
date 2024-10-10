@@ -1,8 +1,5 @@
-use ffmpeg_next::{format as avformat, frame::Video, software};
-use std::{
-    path::PathBuf,
-    time::{Instant, SystemTime},
-};
+use ffmpeg::{format as avformat, frame::Video, software};
+use std::path::PathBuf;
 
 use scap::{
     capturer::{Area, Capturer, Options, Point, Resolution, Size},
@@ -63,9 +60,17 @@ pub fn list_capture_windows() -> Vec<CaptureWindow> {
             }
             _ => None,
         })
-        .map(|target| CaptureWindow {
-            id: target.id,
-            name: target.title,
+        .map(|scap_window| {
+            // Find the corresponding window to get the application name
+            let app_name = windows
+                .iter()
+                .find(|window| window.window_number == scap_window.raw_handle)
+                .map(|window| window.owner_name.clone())
+                .unwrap_or(scap_window.title.clone());
+            CaptureWindow {
+                id: scap_window.id,
+                name: app_name,
+            }
         })
         .collect::<Vec<_>>()
 }
@@ -93,6 +98,11 @@ pub async fn start_capturing(
     start_writing_rx: watch::Receiver<bool>,
 ) -> CaptureController {
     dbg!(capture_target);
+
+    // Bring the window into focus if we're capturing a window
+    if let CaptureTarget::Window { id: window_number } = capture_target {
+        bring_window_to_focus(*window_number);
+    }
 
     let targets = scap::get_all_targets();
 
@@ -203,12 +213,14 @@ pub async fn start_capturing(
 
                 match frame {
                     Ok(Frame::BGRA(frame)) => {
-                        let rgb_frame = bgra_frame(&frame.data, capture_size[0], capture_size[1]);
+                        if let Some(rgb_frame) =
+                            bgra_frame(&frame.data, capture_size[0], capture_size[1])
+                        {
+                            let mut yuv_frame = Video::empty();
+                            scaler.run(&rgb_frame, &mut yuv_frame).unwrap();
 
-                        let mut yuv_frame = Video::empty();
-                        scaler.run(&rgb_frame, &mut yuv_frame).unwrap();
-
-                        encoder.encode_frame(yuv_frame, frame.display_time / 1_000_000);
+                            encoder.encode_frame(yuv_frame, frame.display_time / 1_000_000);
+                        }
                     }
                     _ => println!("Failed to get frame"),
                 }
@@ -249,4 +261,110 @@ fn scale_dimensions(width: u32, height: u32, max_width: u32) -> (u32, u32) {
 
     // Ensure dimensions are divisible by 2
     (new_width & !1, new_height & !1)
+}
+
+use crate::macos::get_on_screen_windows;
+use std::io::Write;
+use std::process::Command;
+use tempfile::NamedTempFile;
+
+fn bring_window_to_focus(window_id: u32) {
+    println!("Attempting to bring window {} to focus", window_id);
+
+    // Get the window information associated with the window id
+    let windows = get_on_screen_windows();
+    if let Some(window) = windows.into_iter().find(|w| w.window_number == window_id) {
+        let process_id = window.process_id;
+        let window_title = window.name.clone();
+        let bounds_x = window.bounds.x;
+        let bounds_y = window.bounds.y;
+        let bounds_width = window.bounds.width;
+        let bounds_height = window.bounds.height;
+        let should_focus = true;
+
+        // Prepare the AppleScript
+        let apple_script = r#"
+        on run argv
+            set processId to item 1 of argv as number
+            set windowTitle to item 2 of argv
+            set boundsX to item 3 of argv as number
+            set boundsY to item 4 of argv as number
+            set boundsWidth to item 5 of argv as number
+            set boundsHeight to item 6 of argv as number
+            set shouldFocus to item 7 of argv as boolean or true
+
+            log "processId: " & processId
+            log "windowTitle: " & windowTitle
+            log "boundsX: " & boundsX
+            log "boundsY: " & boundsY
+            log "boundsWidth: " & boundsWidth
+            log "boundsHeight: " & boundsHeight
+
+            tell application "System Events"
+                set appProcess to first process whose unix id is processId
+                set frontmost of appProcess to true
+
+                tell appProcess
+                    set appWindowsCount to count of windows
+                    log "appWindowsCount: " & appWindowsCount
+
+                    if appWindowsCount is equal to 1 then
+                        perform action "AXRaise" of first window
+                        log "--found window--"
+                        return
+                    end if
+
+                    repeat with checkedWindow in windows
+                        tell checkedWindow
+                            if title contains windowTitle and position is equal to {boundsX, boundsY} and size is equal to {boundsWidth, boundsHeight} then
+                                perform action "AXRaise" of checkedWindow
+                                log "--found window--"
+                                exit repeat
+                            end if
+                        end tell
+                    end repeat
+                end tell
+            end tell
+        end run
+        "#;
+
+        // Prepare arguments
+        let args = vec![
+            process_id.to_string(),
+            window_title.clone(),
+            bounds_x.to_string(),
+            bounds_y.to_string(),
+            bounds_width.to_string(),
+            bounds_height.to_string(),
+            should_focus.to_string(),
+        ];
+
+        // Write the AppleScript to a temporary file
+        let mut script_file = NamedTempFile::new().expect("Failed to create temp file");
+        script_file
+            .write_all(apple_script.as_bytes())
+            .expect("Failed to write to temp file");
+
+        // Execute the AppleScript with arguments
+        let output = Command::new("osascript")
+            .arg(script_file.path())
+            .args(&args)
+            .output();
+
+        match output {
+            Ok(output) => {
+                if output.status.success() {
+                    println!("Successfully executed AppleScript");
+                } else {
+                    let error_message = String::from_utf8_lossy(&output.stderr);
+                    eprintln!("AppleScript execution failed: {}", error_message);
+                }
+            }
+            Err(e) => eprintln!("Failed to execute AppleScript: {}", e),
+        }
+
+        println!("Finished attempt to bring window {} to focus", window_id);
+    } else {
+        eprintln!("Window with id {} not found", window_id);
+    }
 }

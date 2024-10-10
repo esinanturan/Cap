@@ -1,6 +1,11 @@
 use std::path::PathBuf;
 
-use ffmpeg_next::{self as ffmpeg, Dictionary};
+use ffmpeg::{
+    self as ffmpeg,
+    format::{self as avformat, context::Output, Pixel},
+    frame::Video,
+    Dictionary,
+};
 
 macro_rules! dict {
 	( $($key:expr => $value:expr),* $(,)*) => ({
@@ -80,29 +85,42 @@ impl H264Encoder {
     }
 
     pub fn encode_frame(&mut self, mut frame: ffmpeg::util::frame::Video, timestamp: u64) {
-        if let Some(last_frame) = &mut self.last_frame {
+        let last_frame_pts = self.last_frame.as_ref().and_then(|f| f.pts());
+
+        if let Some(mut last_frame_pts) = last_frame_pts {
             let pts = {
                 let delta_time = if let Some(start_time) = self.start_time {
                     (timestamp - start_time) as i64
                 } else {
                     self.start_time = Some(timestamp);
-
                     0
                 };
 
                 (delta_time as f64 / (1000.0 / self.fps)).round() as i64
             };
 
-            // we should probably do something better than just dropping frames lol
-            if Some(pts) <= last_frame.pts() {
+            // Drop frames that are too old
+            if pts <= last_frame_pts {
                 return;
             }
 
-            // duplicate previous frame if this frame is >1 frame in the future
-            while Some(pts - 1) > last_frame.pts() {
-                let pts = Some(last_frame.pts().unwrap() + 1);
-                last_frame.set_pts(pts);
-                self.context.send_frame(&last_frame).unwrap();
+            // Limit the number of frames to duplicate
+            let max_duplicate_frames = 5;
+            let frames_to_duplicate = std::cmp::min(pts - last_frame_pts - 1, max_duplicate_frames);
+
+            // Duplicate previous frame if this frame is >1 frame in the future
+            for _ in 0..frames_to_duplicate {
+                last_frame_pts += 1;
+
+                if let Some(last_frame) = &mut self.last_frame {
+                    last_frame.set_pts(Some(last_frame_pts));
+                    if let Err(e) = self.context.send_frame(last_frame) {
+                        eprintln!("Error sending duplicate frame: {:?}", e);
+                        break;
+                    }
+                }
+
+                self.receive_and_process_packets();
             }
 
             frame.set_pts(Some(pts));
@@ -110,7 +128,9 @@ impl H264Encoder {
             frame.set_pts(Some(0));
         }
 
-        self.context.send_frame(&frame).unwrap();
+        if let Err(e) = self.context.send_frame(&frame) {
+            eprintln!("Error sending frame: {:?}", e);
+        }
         self.last_frame = Some(frame);
 
         self.receive_and_process_packets();
@@ -125,14 +145,10 @@ impl H264Encoder {
                 self.output.stream(self.stream_index).unwrap().time_base(),
             );
 
-            // println!(
-            //     "writing packet - dts: {:?}, pts: {:?}, flags: {:?}",
-            //     encoded.dts(),
-            //     encoded.pts(),
-            //     encoded.flags()
-            // );
-
-            encoded.write_interleaved(&mut self.output).unwrap();
+            if let Err(e) = encoded.write_interleaved(&mut self.output) {
+                eprintln!("Error writing packet: {:?}", e);
+                break;
+            }
         }
     }
 
@@ -145,23 +161,16 @@ impl H264Encoder {
     }
 }
 
-pub fn bgra_frame(bytes: &[u8], width: u32, height: u32) -> ffmpeg::frame::Video {
-    let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height);
+pub fn uyvy422_frame(bytes: &[u8], width: u32, height: u32) -> ffmpeg::frame::Video {
+    let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::UYVY422, width, height);
 
-    let stride = frame.stride(0);
-
-    for (in_line, out_line) in bytes
-        .chunks(width as usize * 4)
-        .zip(frame.data_mut(0).chunks_mut(stride))
-    {
-        out_line[0..(width as usize * 4)].copy_from_slice(in_line);
-    }
+    frame.data_mut(0).copy_from_slice(bytes);
 
     frame
 }
 
-pub fn uyvy422_frame(bytes: &[u8], width: u32, height: u32) -> ffmpeg::frame::Video {
-    let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::UYVY422, width, height);
+pub fn yuyv422_frame(bytes: &[u8], width: u32, height: u32) -> ffmpeg::frame::Video {
+    let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::YUYV422, width, height);
 
     frame.data_mut(0).copy_from_slice(bytes);
 
@@ -177,6 +186,31 @@ pub fn nv12_frame(bytes: &[u8], width: u32, height: u32) -> ffmpeg::frame::Video
     frame.data_mut(1)[..uv_size].copy_from_slice(&bytes[y_size..y_size + uv_size]);
 
     frame
+}
+
+pub fn bgra_frame(data: &[u8], width: u32, height: u32) -> Option<ffmpeg::frame::Video> {
+    let expected_size = (width as usize) * (height as usize) * 4; // 4 bytes per pixel for BGRA
+
+    if data.len() != expected_size {
+        return None;
+    }
+
+    let mut frame = Video::new(Pixel::BGRA, width, height);
+
+    let frame_linesize = frame.stride(0) as usize;
+    let bytes_per_pixel = 4; // For BGRA format
+
+    let expected_linesize = (width as usize) * bytes_per_pixel;
+
+    // Copy data line by line considering linesize differences
+    for (src_row, dst_row) in data
+        .chunks_exact(expected_linesize)
+        .zip(frame.data_mut(0).chunks_exact_mut(frame_linesize))
+    {
+        dst_row[..expected_linesize].copy_from_slice(src_row);
+    }
+
+    Some(frame)
 }
 
 pub struct MP3Encoder {
